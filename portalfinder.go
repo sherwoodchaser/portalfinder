@@ -1,29 +1,24 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
-	"net/http"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"net/http"
 )
 
-var createAccountPaths = []string{
-	"login", "register", "signup", "signin", "create-account", "log-in", "sign-in", "sign-up", "authentication", "forgot-password", "reset-password",
-}
-
-var createAccountKeywords = []string{
-	"login", "register", "signup", "signin", "create account", "log in", "sign in", "sign up", "authentication", "forgot password", "reset password",
-}
-
 var httpClient = &http.Client{
-	Timeout: 10 * time.Second, // Set a timeout for each request
+	Timeout: 10 * time.Second,
+}
+
+// List of account creation paths to check
+var createAccountPaths = []string{
+	"signup", "register", "create-account", "account/create", "user/create", "account/signup",
 }
 
 func main() {
@@ -48,7 +43,16 @@ func main() {
 		return
 	}
 
-	var validSubdomains []string
+	// Open the output file in append mode
+	var outputFile *os.File
+	if *outputFlag != "" {
+		outputFile, err = os.OpenFile(*outputFlag, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		if err != nil {
+			log.Fatalf("Error opening output file: %v", err)
+		}
+		defer outputFile.Close()
+	}
+
 	var wg sync.WaitGroup
 	indicatorDone := make(chan bool) // Channel to control animation
 	progressChan := make(chan int)   // Channel to update progress
@@ -63,8 +67,8 @@ func main() {
 		wg.Add(1)
 		go func(idx int, subdomain string) {
 			defer wg.Done()
-			if checkSubdomain(subdomain, *verboseFlag) {
-				validSubdomains = append(validSubdomains, subdomain)
+			if checkSubdomain(subdomain, *verboseFlag, outputFile) {
+				// Directly write to file in the goroutine
 			}
 			// Update progress safely using mutex
 			mu.Lock()
@@ -81,70 +85,40 @@ func main() {
 
 	// Stop the animated indicator
 	indicatorDone <- true
-
-	// Save valid subdomains to the output file if specified
-	if *outputFlag != "" {
-		err := saveSubdomainsToFile(validSubdomains, *outputFlag)
-		if err != nil {
-			log.Fatalf("Error saving valid subdomains to file: %v", err)
-		}
-		fmt.Printf("\nValid subdomains saved to %s\n", *outputFlag)
-	}
 }
 
-// Animated loading indicator with progress
+// Animated indicator for progress display
 func animatedIndicator(done chan bool, total int, progressChan chan int) {
-	animation := []string{"\\", "|", "/", "-"}
-	i := 0
+	animations := []string{"|", "/", "-", "\\"}
+	progress := 0
 	for {
 		select {
 		case <-done:
 			return
-		case progress := <-progressChan:
-			// Update the progress with subdomains processed
-			fmt.Printf("\rChecking subdomains (%d/%d) ... %s", progress, total, animation[i])
-			i = (i + 1) % len(animation)
-			time.Sleep(100 * time.Millisecond)
+		case progress = <-progressChan:
+			// Print progress with the animation
+			animationIndex := progress % len(animations)
+			fmt.Printf("\r[%s] %d/%d subdomains checked", animations[animationIndex], progress, total)
 		}
 	}
 }
 
-func printBanner() {
-	banner := `
-	██████╗  ██████╗ ██████╗ ████████╗ █████╗ ██╗     ███████╗██╗███╗   ██╗██████╗ ███████╗██████╗ 
-	██╔══██╗██╔═══██╗██╔══██╗╚══██╔══╝██╔══██╗██║     ██╔════╝██║████╗  ██║██╔══██╗██╔════╝██╔══██╗
-	██████╔╝██║   ██║██████╔╝   ██║   ███████║██║     █████╗  ██║██╔██╗ ██║██║  ██║█████╗  ██████╔╝
-	██╔═══╝ ██║   ██║██╔══██╗   ██║   ██╔══██║██║     ██╔══╝  ██║██║╚██╗██║██║  ██║██╔══╝  ██╔══██╗
-	██║     ╚██████╔╝██║  ██║   ██║   ██║  ██║███████╗██║     ██║██║ ╚████║██████╔╝███████╗██║  ██║
-	╚═╝      ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝╚═╝  ╚═══╝╚═════╝ ╚══════╝╚═╝  ╚═╝
- `
-	fmt.Printf("\033[3m\033[1;34m%s\033[0m", banner)
-	fmt.Printf("\t\t\033[1;32m⭐ PortalFinder - Account Portal Detection Tool 🗡️ | Built by Sherwood Chaser 🌟\033[0m\n\n")
-}
-
-
-
-func readSubdomainsFromFile(filePath string) ([]string, error) {
-	var subdomains []string
-	file, err := os.Open(filePath)
+// Read subdomains from a file
+func readSubdomainsFromFile(filename string) ([]string, error) {
+	content, err := ioutil.ReadFile(filename)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
 
-	scanner := bufio.NewScanner(file)
-	for scanner.Scan() {
-		subdomains = append(subdomains, scanner.Text())
+	subdomains := strings.Split(string(content), "\n")
+	for i := range subdomains {
+		subdomains[i] = strings.TrimSpace(subdomains[i])
 	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-
 	return subdomains, nil
 }
 
-func checkSubdomain(subdomain string, verbose bool) bool {
+// Check subdomain and directly save valid ones to the output file
+func checkSubdomain(subdomain string, verbose bool, outputFile *os.File) bool {
 	accountPortalFound := false
 	redirectURL := ""
 	detectionMethod := ""
@@ -198,6 +172,13 @@ func checkSubdomain(subdomain string, verbose bool) bool {
 		} else {
 			fmt.Printf("\033[32m[v] Subdomain has account portal: %s\033[0m [Detected via: %s, Keyword: %s]\n", subdomain, detectionMethod, matchedKeyword)
 		}
+		if outputFile != nil {
+			// Write the valid subdomain to the output file immediately
+			_, err := outputFile.WriteString(subdomain + "\n")
+			if err != nil {
+				log.Printf("Error writing to output file: %v", err)
+			}
+		}
 		return true
 	} else {
 		if verbose {
@@ -207,8 +188,10 @@ func checkSubdomain(subdomain string, verbose bool) bool {
 	}
 }
 
+// Helper function to find matching keywords (this can be extended as needed)
 func findMatchingKeyword(body string) string {
-	for _, keyword := range createAccountKeywords {
+	keywords := []string{"create account", "sign up", "register", "join", "signup"}
+	for _, keyword := range keywords {
 		if strings.Contains(strings.ToLower(body), keyword) {
 			return keyword
 		}
@@ -216,42 +199,32 @@ func findMatchingKeyword(body string) string {
 	return ""
 }
 
-func containsCreateAccountLinks(body string) bool {
-	linkPattern := `<a[^>]*href="([^"]*)"[^>]*>(.*?)</a>|<button[^>]*>(.*?)</button>`
-	re := regexp.MustCompile(linkPattern)
-	matches := re.FindAllStringSubmatch(body, -1)
+// Helper function to check for forms in the body
+func containsForm(body string) bool {
+	return strings.Contains(body, "<form")
+}
 
-	for _, match := range matches {
-		if len(match) > 1 && findMatchingKeyword(match[1]) != "" {
-			return true
-		}
-		if len(match) > 2 && findMatchingKeyword(match[2]) != "" {
+// Helper function to check for account creation links or buttons
+func containsCreateAccountLinks(body string) bool {
+	links := []string{"create account", "sign up", "register", "join"}
+	for _, link := range links {
+		if strings.Contains(strings.ToLower(body), link) {
 			return true
 		}
 	}
-
 	return false
 }
 
-func containsForm(body string) bool {
-	formPattern := `<form[^>]*>`
-	re := regexp.MustCompile(formPattern)
-	return re.MatchString(body)
-}
 
-func saveSubdomainsToFile(subdomains []string, filePath string) error {
-	file, err := os.Create(filePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	for _, subdomain := range subdomains {
-		_, err := file.WriteString(subdomain + "\n")
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
+func printBanner() {
+	banner := `
+	██████╗  ██████╗ ██████╗ ████████╗ █████╗ ██╗     ███████╗██╗███╗   ██╗██████╗ ███████╗██████╗ 
+	██╔══██╗██╔═══██╗██╔══██╗╚══██╔══╝██╔══██╗██║     ██╔════╝██║████╗  ██║██╔══██╗██╔════╝██╔══██╗
+	██████╔╝██║   ██║██████╔╝   ██║   ███████║██║     █████╗  ██║██╔██╗ ██║██║  ██║█████╗  ██████╔╝
+	██╔═══╝ ██║   ██║██╔══██╗   ██║   ██╔══██║██║     ██╔══╝  ██║██║╚██╗██║██║  ██║██╔══╝  ██╔══██╗
+	██║     ╚██████╔╝██║  ██║   ██║   ██║  ██║███████╗██║     ██║██║ ╚████║██████╔╝███████╗██║  ██║
+	╚═╝      ╚═════╝ ╚═╝  ╚═╝   ╚═╝   ╚═╝  ╚═╝╚══════╝╚═╝     ╚═╝╚═╝  ╚═══╝╚═════╝ ╚══════╝╚═╝  ╚═╝
+ `
+	fmt.Printf("\033[3m\033[1;34m%s\033[0m", banner)
+	fmt.Printf("\t\t\033[1;32m⭐ PortalFinder - Account Portal Detection Tool 🗡️ | Built by Sherwood Chaser 🌟\033[0m\n\n")
 }
